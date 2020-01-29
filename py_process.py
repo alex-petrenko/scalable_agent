@@ -49,6 +49,7 @@ from __future__ import division
 from __future__ import print_function
 
 import multiprocessing
+import os
 
 import tensorflow as tf
 
@@ -79,7 +80,22 @@ class _TFProxy(object):
       flat_dtypes = nest.flatten(nest.map_structure(lambda s: s.dtype, specs))
       flat_shapes = nest.flatten(nest.map_structure(lambda s: s.shape, specs))
 
+      # def py_call(*args):
+      #   try:
+      #     self._out.send(args)
+      #     result = self._out.recv()
+      #     if isinstance(result, Exception):
+      #       raise result
+      #     if result is not None:
+      #       return result
+      #   except Exception as e:
+      #     if isinstance(e, IOError):
+      #       raise StopIteration()  # Clean exit.
+      #     else:
+      #       raise
+
       def py_call(*args):
+        args = (args[0].decode('utf-8'), *args[1:]) # insert this
         try:
           self._out.send(args)
           result = self._out.recv()
@@ -124,6 +140,9 @@ class _TFProxy(object):
     self._process.join()
 
   def _worker_fn(self, type_, constructor_kwargs, in_):
+    print('started process!!!')
+    # print(os.environ)
+
     try:
       o = type_(**constructor_kwargs)
 

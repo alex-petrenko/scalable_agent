@@ -31,6 +31,7 @@ import py_process
 import sonnet as snt
 import tensorflow as tf
 import vtrace
+from environments_doom import PyProcessDoom, DOOM_ACTION_SET
 
 try:
   import dynamic_batching
@@ -148,27 +149,34 @@ class Agent(snt.RNNCore):
     frame = tf.to_float(frame)
 
     frame /= 255
+    # with tf.variable_scope('convnet'):
+    #   conv_out = frame
+    #   for i, (num_ch, num_blocks) in enumerate([(16, 2), (32, 2), (32, 2)]):
+    #     # Downscale.
+    #     conv_out = snt.Conv2D(num_ch, 3, stride=1, padding='SAME')(conv_out)
+    #     conv_out = tf.nn.pool(
+    #         conv_out,
+    #         window_shape=[3, 3],
+    #         pooling_type='MAX',
+    #         padding='SAME',
+    #         strides=[2, 2])
+    #
+    #     # Residual block(s).
+    #     for j in range(num_blocks):
+    #       with tf.variable_scope('residual_%d_%d' % (i, j)):
+    #         block_input = conv_out
+    #         conv_out = tf.nn.relu(conv_out)
+    #         conv_out = snt.Conv2D(num_ch, 3, stride=1, padding='SAME')(conv_out)
+    #         conv_out = tf.nn.relu(conv_out)
+    #         conv_out = snt.Conv2D(num_ch, 3, stride=1, padding='SAME')(conv_out)
+    #         conv_out += block_input
+
     with tf.variable_scope('convnet'):
       conv_out = frame
-      for i, (num_ch, num_blocks) in enumerate([(16, 2), (32, 2), (32, 2)]):
+      for i, (num_ch, filter_size, stride) in enumerate([(32, 8, 4), (64, 4, 2), (128, 3, 2)]):
         # Downscale.
-        conv_out = snt.Conv2D(num_ch, 3, stride=1, padding='SAME')(conv_out)
-        conv_out = tf.nn.pool(
-            conv_out,
-            window_shape=[3, 3],
-            pooling_type='MAX',
-            padding='SAME',
-            strides=[2, 2])
-
-        # Residual block(s).
-        for j in range(num_blocks):
-          with tf.variable_scope('residual_%d_%d' % (i, j)):
-            block_input = conv_out
-            conv_out = tf.nn.relu(conv_out)
-            conv_out = snt.Conv2D(num_ch, 3, stride=1, padding='SAME')(conv_out)
-            conv_out = tf.nn.relu(conv_out)
-            conv_out = snt.Conv2D(num_ch, 3, stride=1, padding='SAME')(conv_out)
-            conv_out += block_input
+        conv_out = snt.Conv2D(num_ch, filter_size, stride=stride, padding='SAME')(conv_out)
+        conv_out = tf.nn.relu(conv_out)
 
     conv_out = tf.nn.relu(conv_out)
     conv_out = snt.BatchFlatten()(conv_out)
@@ -417,26 +425,32 @@ def build_learner(agent, agent_state, env_outputs, agent_outputs):
 
 def create_environment(level_name, seed, is_test=False):
   """Creates an environment wrapped in a `FlowEnvironment`."""
-  if level_name in dmlab30.ALL_LEVELS:
-    level_name = 'contributed/dmlab30/' + level_name
+  if level_name.startswith('doom_'):
+      config = None
+      p = py_process.PyProcess(PyProcessDoom, level_name, config, FLAGS.num_action_repeats, seed)
+      return environments.FlowEnvironment(p.proxy)
+  else:
+      if level_name in dmlab30.ALL_LEVELS:
+        level_name = 'contributed/dmlab30/' + level_name
 
-  # Note, you may want to use a level cache to speed of compilation of
-  # environment maps. See the documentation for the Python interface of DeepMind
-  # Lab.
-  config = {
-      'width': FLAGS.width,
-      'height': FLAGS.height,
-      'datasetPath': FLAGS.dataset_path,
-      'logLevel': 'WARN',
-  }
-  if is_test:
-    config['allowHoldOutLevels'] = 'true'
-    # Mixer seed for evalution, see
-    # https://github.com/deepmind/lab/blob/master/docs/users/python_api.md
-    config['mixerSeed'] = 0x600D5EED
-  p = py_process.PyProcess(environments.PyProcessDmLab, level_name, config,
-                           FLAGS.num_action_repeats, seed)
-  return environments.FlowEnvironment(p.proxy)
+      # Note, you may want to use a level cache to speed of compilation of
+      # environment maps. See the documentation for the Python interface of DeepMind
+      # Lab.
+      config = {
+          'width': FLAGS.width,
+          'height': FLAGS.height,
+          'datasetPath': FLAGS.dataset_path,
+          'logLevel': 'WARN',
+          'gpuDeviceIndex': '0',
+      }
+      if is_test:
+        config['allowHoldOutLevels'] = 'true'
+        # Mixer seed for evalution, see
+        # https://github.com/deepmind/lab/blob/master/docs/users/python_api.md
+        config['mixerSeed'] = 0x600D5EED
+      p = py_process.PyProcess(environments.PyProcessDmLab, level_name, config,
+                               FLAGS.num_action_repeats, seed)
+      return environments.FlowEnvironment(p.proxy)
 
 
 @contextlib.contextmanager
@@ -465,7 +479,14 @@ def train(action_set, level_names):
     is_actor_fn = lambda i: True
     is_learner = True
     global_variable_device = '/gpu'
-    server = tf.train.Server.create_local_server()
+
+    gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.5)
+    config = tf.ConfigProto(
+        device_count={'GPU':1},
+        gpu_options=gpu_options,
+        log_device_placement=False,
+    )
+    server = tf.train.Server.create_local_server(config=config)
     filters = []
   else:
     local_job_device = '/job:%s/task:%d' % (FLAGS.job_name, FLAGS.task)
@@ -487,8 +508,9 @@ def train(action_set, level_names):
   # Only used to find the actor output structure.
   with tf.Graph().as_default():
     agent = Agent(len(action_set))
-    env = create_environment(level_names[0], seed=1)
-    structure = build_actor(agent, env, level_names[0], action_set)
+    level_names_list = list(level_names)
+    env = create_environment(level_names_list[0], seed=1)
+    structure = build_actor(agent, env, level_names_list[0], action_set)
     flattened_structure = nest.flatten(structure)
     dtypes = [t.dtype for t in flattened_structure]
     shapes = [t.shape.as_list() for t in flattened_structure]
@@ -521,7 +543,7 @@ def train(action_set, level_names):
     enqueue_ops = []
     for i in range(FLAGS.num_actors):
       if is_actor_fn(i):
-        level_name = level_names[i % len(level_names)]
+        level_name = level_names_list[i % len(level_names)]
         tf.logging.info('Creating actor %d with level %s', i, level_name)
         env = create_environment(level_name, seed=i + 1)
         actor_output = build_actor(agent, env, level_name, action_set)
@@ -576,6 +598,7 @@ def train(action_set, level_names):
     # Create MonitoredSession (to run the graph, checkpoint and log).
     tf.logging.info('Creating MonitoredSession, is_chief %s', is_learner)
     config = tf.ConfigProto(allow_soft_placement=True, device_filters=filters)
+    config.gpu_options.per_process_gpu_memory_fraction = 0.5
     with tf.train.MonitoredTrainingSession(
         server.target,
         is_chief=is_learner,
@@ -612,9 +635,9 @@ def train(action_set, level_names):
                             level_name, episode_return)
 
             summary = tf.summary.Summary()
-            summary.value.add(tag=level_name + '/episode_return',
+            summary.value.add(tag=str(level_name) + '/episode_return',
                               simple_value=episode_return)
-            summary.value.add(tag=level_name + '/episode_frames',
+            summary.value.add(tag=str(level_name) + '/episode_frames',
                               simple_value=episode_frames)
             summary_writer.add_summary(summary, num_env_frames_v)
 
@@ -682,13 +705,17 @@ def test(action_set, level_names):
 def main(_):
   tf.logging.set_verbosity(tf.logging.INFO)
 
-  action_set = environments.DEFAULT_ACTION_SET
   if FLAGS.level_name == 'dmlab30' and FLAGS.mode == 'train':
     level_names = dmlab30.LEVEL_MAPPING.keys()
   elif FLAGS.level_name == 'dmlab30' and FLAGS.mode == 'test':
     level_names = dmlab30.LEVEL_MAPPING.values()
   else:
     level_names = [FLAGS.level_name]
+
+  if level_names[0].startswith('doom_'):
+    action_set = DOOM_ACTION_SET
+  else:
+    action_set = environments.DEFAULT_ACTION_SET
 
   if FLAGS.mode == 'train':
     train(action_set, level_names)
