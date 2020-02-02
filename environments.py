@@ -74,12 +74,19 @@ class PyProcessDmLab(object):
       deepmind_lab.set_runfiles_path(runfiles_path)
     config = {k: str(v) for k, v in config.items()}
     self._observation_spec = ['RGB_INTERLEAVED', 'INSTR']
+
+    renderer = config['renderer']
+    self.benchmark_mode = config['benchmark_mode']
+
+    if self.benchmark_mode:
+        print('BENCHMARK MODE IS ON! USE THIS ONLY FOR TESTING AND THROUGHPUT MEASUREMENT!')
+
     self._env = deepmind_lab.Lab(
         level=level,
         observations=self._observation_spec,
         config=config,
         level_cache=level_cache,
-        renderer='hardware',
+        renderer=renderer,
     )
 
   def _reset(self):
@@ -94,6 +101,13 @@ class PyProcessDmLab(object):
     return self._observation()
 
   def step(self, action):
+    if self.benchmark_mode:
+      # the performance of many DMLab environments heavily depends on what agent is actually doing
+      # therefore for purposes of measuring throughput we ignore the actions, this way the agent executes
+      # random policy and we can measure raw throughput more precisely
+      action_random = self._random_state.randint(0, len(DEFAULT_ACTION_SET))
+      action = np.array(DEFAULT_ACTION_SET[action_random], dtype=action.dtype)
+
     reward = self._env.step(action, num_steps=self._num_action_repeats)
     done = np.array(not self._env.is_running())
     if done:

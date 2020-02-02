@@ -84,6 +84,10 @@ flags.DEFINE_string('level_name', 'explore_goal_locations_small',
 flags.DEFINE_integer('width', 96, 'Width of observation.')
 flags.DEFINE_integer('height', 72, 'Height of observation.')
 
+flags.DEFINE_string('renderer', 'software', 'Renderer for DMLAB')
+flags.DEFINE_integer('benchmark_mode', 0, 'Ignore the policy actions and actually execute random policy. Use this only for throughput measurements! Agent will never learn with this flag set')
+
+
 # Optimizer settings.
 flags.DEFINE_float('learning_rate', 0.00048, 'Learning rate.')
 flags.DEFINE_float('decay', .99, 'RMSProp optimizer decay.')
@@ -442,6 +446,8 @@ def create_environment(level_name, seed, is_test=False):
           'datasetPath': FLAGS.dataset_path,
           'logLevel': 'WARN',
           'gpuDeviceIndex': '0',
+          'renderer': FLAGS.renderer,
+          'benchmark_mode': FLAGS.benchmark_mode,
       }
       if is_test:
         config['allowHoldOutLevels'] = 'true'
