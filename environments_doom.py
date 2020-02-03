@@ -3,6 +3,7 @@ import random
 import numpy as np
 
 import tensorflow as tf
+from filelock import FileLock, Timeout
 
 from algorithms.utils.arguments import default_cfg
 from envs.create_env import create_env
@@ -12,6 +13,7 @@ DOOM_W = 128
 DOOM_H = 72
 
 
+# use the same number of actions as dmlab
 DOOM_ACTION_SET = (
     0, #MOVE_FORWARD
     1, #MOVE_BACKWARD
@@ -23,6 +25,9 @@ DOOM_ACTION_SET = (
     7, #SPEED
     8, #USE
 )
+
+
+DOOM_LOCK_PATH = '/tmp/doom_impala_lock'
 
 
 class PyProcessDoom:
@@ -37,11 +42,19 @@ class PyProcessDoom:
     cfg.res_h = DOOM_H
     cfg.wide_aspect_ratio = False
     self._env = create_env(env_name, cfg=cfg)
-    print('Resetting the doom env...')
-    import time
-    time.sleep(random.random() * 3)
-    self._env.reset()
-    print('Done!!!')
+
+    lock = FileLock(DOOM_LOCK_PATH)
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with lock.acquire(timeout=10):
+                print('Env created, resetting...')
+                self._env.reset()
+                print('Env reset completed!')
+                break
+        except Timeout:
+            print('Another instance of this application currently holds the lock, attempt:', attempt)
 
   def _reset(self):
     self._env.reset()
