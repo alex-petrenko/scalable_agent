@@ -1,13 +1,9 @@
 import copy
 import os
-import sys
-
-import numpy as np
 
 from envs.doom.doom_gym import VizdoomEnv
 from utils.network import is_udp_port_available
 from utils.utils import log
-
 
 DEFAULT_UDP_PORT = int(os.environ.get('DOOM_DEFAULT_UDP_PORT', 40300))
 log.info('Default UDP port is %r', DEFAULT_UDP_PORT)
@@ -30,6 +26,7 @@ class VizdoomEnvMultiplayer(VizdoomEnv):
             player_id, num_agents, max_num_players, num_bots,
             skip_frames, async_mode=False,
             respawn_delay=0,
+            timelimit=0.0,
             record_to=None):
         super().__init__(
             action_space,
@@ -63,6 +60,7 @@ class VizdoomEnvMultiplayer(VizdoomEnv):
         self.hardest_bot = 100
         self.easiest_bot = 10
         self.respawn_delay = respawn_delay
+        self.timelimit = timelimit
 
         self.is_multiplayer = True
         self.init_info = None
@@ -90,7 +88,7 @@ class VizdoomEnvMultiplayer(VizdoomEnv):
                 f'-host {self.max_num_players}',
                 f'-port {port}',
                 '-deathmatch',  # Deathmatch rules are used for the game.
-                '+timelimit 4.0',  # The game (episode) will end after this many minutes have elapsed.
+                f'+timelimit {self.timelimit}',  # The game (episode) will end after this many minutes have elapsed.
                 '+sv_forcerespawn 1',  # Players will respawn automatically after they die.
                 '+sv_noautoaim 1',  # Autoaim is disabled for all players.
                 '+sv_respawnprotect 1',  # Players will be invulnerable for two second after spawning.
@@ -115,13 +113,11 @@ class VizdoomEnvMultiplayer(VizdoomEnv):
             # 0 - green, 1 - gray, 2 - brown, 3 - red, 4 - light gray, 5 - light brown, 6 - light red, 7 - light blue
             self.game.add_game_args(f'+name AI{self.player_id}_host +colorset 0')
 
-            # Warning! This does not work, see https://github.com/mwydmuch/ViZDoom/issues/402
-            # if self.record_to is not None:
-            #     # reportedly this does not work with bots
-            #     demo_path = self.demo_path(self._num_episodes)
-            #     log.debug('Recording multiplayer demo to %s', demo_path)
-            #     self.game.add_game_args(f'-record {demo_path}')
-
+            if self.record_to is not None:
+                # reportedly this does not work with bots
+                demo_path = self.demo_path(self._num_episodes)
+                log.debug('Recording multiplayer demo to %s', demo_path)
+                self.game.add_game_args(f'-record {demo_path}')
         else:
             # Join existing game.
             self.game.add_game_args(
@@ -134,12 +130,9 @@ class VizdoomEnvMultiplayer(VizdoomEnv):
             # 0 - green, 1 - gray, 2 - brown, 3 - red, 4 - light gray, 5 - light brown, 6 - light red, 7 - light blue
             self.game.add_game_args(f'+name AI{self.player_id} +colorset 0')
 
-        try:
-            self.game.init()
-        except Exception:
-            log.warning('game.init() threw exception. Terminate process')
-            sys.exit(1)
+        self.game.set_episode_timeout(int(self.timelimit * 60 * self.game.get_ticrate()))
 
+        self._game_init(with_locking=False)  # locking is handled by the multi-agent wrapper
         log.info('Initialized w:%d v:%d player:%d', self.worker_index, self.vector_index, self.player_id)
         self.initialized = True
 
@@ -194,7 +187,6 @@ class VizdoomEnvMultiplayer(VizdoomEnv):
             return super().step(actions)
 
         self._ensure_initialized()
-        info = {}
 
         actions_binary = self._convert_actions(actions)
 
@@ -208,13 +200,13 @@ class VizdoomEnvMultiplayer(VizdoomEnv):
         state = self.game.get_state()
         reward = self.game.get_last_reward()
         done = self.game.is_episode_finished()
-        if not done:
-            observation = np.transpose(state.screen_buffer, (1, 2, 0))
-            game_variables = self._game_variables_dict(state)
-            info.update(self.get_info(game_variables))
-        else:
-            observation = np.zeros(self.observation_space.shape, dtype=np.uint8)
 
-        self._vizdoom_variables_bug_workaround(info, done)
+        if self.record_to is not None:
+            # send 'stop recording' command 1 tick before the end of the episode
+            # otherwise it does not get saved to disk
+            if self.game.get_episode_time() + 1 == self.game.get_episode_timeout():
+                log.debug('Calling stop recording command!')
+                self.game.send_game_command('stop')
 
+        observation, done, info = self._process_game_step(state, done, {})
         return observation, reward, done, info

@@ -1,6 +1,7 @@
 import gym
 
-from envs.env_wrappers import ResizeWrapper, StackFramesWrapper, SkipAndStackFramesWrapper
+from envs.env_wrappers import ResizeWrapper, SkipAndStackFramesWrapper, SkipFramesWrapper, \
+    PixelFormatChwWrapper
 
 ATARI_W = ATARI_H = 84
 
@@ -47,9 +48,17 @@ def make_atari_env(env_name, cfg, **kwargs):
 
     # if 'Montezuma' in atari_cfg.env_id or 'Pitfall' in atari_cfg.env_id:
     #     env = AtariVisitedRoomsInfoWrapper(env)
-
-    env = ResizeWrapper(env, ATARI_W, ATARI_H, grayscale=True, add_channel_dim=False, area_interpolation=False)
-    env = SkipAndStackFramesWrapper(
-        env, skip_frames=cfg.env_frameskip, stack_frames=4, channel_config='CHW',
+    add_channel_dim = cfg.env_framestack == 1
+    env = ResizeWrapper(
+        env, ATARI_W, ATARI_H, grayscale=True, add_channel_dim=add_channel_dim, area_interpolation=False,
     )
+
+    pixel_format = cfg.pixel_format if 'pixel_format' in cfg else 'HWC'
+    if pixel_format == 'CHW' and add_channel_dim:
+        env = PixelFormatChwWrapper(env)
+
+    if cfg.env_framestack == 1:
+        env = SkipFramesWrapper(env, skip_frames=cfg.env_frameskip)
+    else:
+        env = SkipAndStackFramesWrapper(env, skip_frames=cfg.env_frameskip, stack_frames=4, channel_config=cfg.pixel_format)
     return env

@@ -232,8 +232,11 @@ class ResizeWrapper(gym.core.Wrapper):
         if self.grayscale:
             new_shape = [self.h, self.w, 1] if self.add_channel_dim else [self.h, self.w]
         else:
-            channels = old_space.shape[-1]
-            new_shape = [self.h, self.w, channels]
+            if len(old_space.shape) > 2:
+                channels = old_space.shape[-1]
+                new_shape = [self.h, self.w, channels]
+            else:
+                new_shape = [self.h, self.w, 1] if self.add_channel_dim else [self.h, self.w]
 
         return spaces.Box(low, high, shape=new_shape, dtype=old_space.dtype)
 
@@ -366,7 +369,7 @@ class RemainingTimeWrapper(ObservationWrapper):
 
 
 class PixelFormatChwWrapper(ObservationWrapper):
-    # TODO? This can be optimized, we can query CHW directly from VizDoom
+    """TODO? This can be optimized for VizDoom, can we query CHW directly from VizDoom?"""
 
     def __init__(self, env):
         super().__init__(env)
@@ -394,7 +397,11 @@ class PixelFormatChwWrapper(ObservationWrapper):
         low, high = img_obs_space.low.flat[0], img_obs_space.high.flat[0]
         new_shape = [c, h, w]
 
-        dtype = env.observation_space.dtype if env.observation_space.dtype is not None else np.float32
+        if self.dict_obs_space:
+            dtype = env.observation_space.spaces['obs'].dtype if env.observation_space.spaces['obs'].dtype is not None else np.float32
+        else:
+            dtype = env.observation_space.dtype if env.observation_space.dtype is not None else np.float32
+
         new_img_obs_space = spaces.Box(low, high, shape=new_shape, dtype=dtype)
 
         if self.dict_obs_space:
@@ -433,8 +440,8 @@ class ClipRewardWrapper(gym.RewardWrapper):
 class RecordingWrapper(gym.core.Wrapper):
     def __init__(self, env, record_to, player_id):
         super().__init__(env)
-        tstamp = datetime.datetime.now().strftime('%Y_%m_%d--%H_%M_%S')
-        self._record_to = join(record_to, tstamp)
+
+        self._record_to = record_to
         self._episode_recording_dir = None
         self._record_id = 0
         self._frame_id = 0
@@ -443,6 +450,9 @@ class RecordingWrapper(gym.core.Wrapper):
         self._recorded_episode_shaping_reward = 0
 
         self._recorded_actions = []
+
+        # Experimental! Recording Doom replay. Does not work in all scenarios, e.g. when there are in-game bots.
+        self.unwrapped.record_to = record_to
 
     def reset(self):
         if self._episode_recording_dir is not None and self._record_id > 0:

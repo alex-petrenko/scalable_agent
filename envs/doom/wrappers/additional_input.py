@@ -24,7 +24,7 @@ class DoomAdditionalInput(gym.Wrapper):
         self.observation_space = gym.spaces.Dict({
             'obs': current_obs_space,
             'measurements': gym.spaces.Box(
-                low=np.array(low), high=np.array(high),
+                low=np.array(low, dtype=np.float32), high=np.array(high, dtype=np.float32),
             ),
         })
 
@@ -50,6 +50,8 @@ class DoomAdditionalInput(gym.Wrapper):
         kills = info.get('USER2', 0.0) / 10.0  # only works in battle and battle2, this is not really useful
         attack_ready = info.get('ATTACK_READY', 0.0)
         num_players = info.get('PLAYER_COUNT', 1) / 5.0
+
+        # TODO add FRAGCOUNT to the input, so agents know when they are winning/losing
 
         measurements = obs_dict['measurements']
 

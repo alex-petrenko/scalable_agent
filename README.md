@@ -17,33 +17,38 @@ Please cite the paper if you use the code from this repository in your work.
   year={2018}
 }
 ```
+## Setup instructions
+
+- Build conda environment
+```sh
+# make sure you are under this folder
+conda env create -f environment.yml 
+conda activate scalable_agent
+```
+
+- Download deepmind_lab-1.0-py3-none-any.whl from https://drive.google.com/file/d/10SjkK7AcegkWBgx31-fbKTNRgNLd0wax/view?usp=sharing
+```sh
+pip install deepmind_lab-1.0-py3-none-any.whl
+```
 
 ## Running the Code
 
-### Prerequisites
-
-[TensorFlow][tensorflow] >=1.9.0-dev20180530, the environment
-[DeepMind Lab][deepmind_lab] and the neural network library
-[DeepMind Sonnet][sonnet]. Although we use [DeepMind Lab][deepmind_lab] in this
-release, the agent has been successfully applied to other domains such as
-[Atari][arxiv], [Street View][learning_nav] and has been modified to
-[generate images][generate_images].
-
-We include a [Dockerfile][dockerfile] that serves as a reference for the
-prerequisites and commands needed to run the code.
-
 ### Single Machine Training on a Single Level
 
-Training on `explore_goal_locations_small`. Most runs should end up with average
-episode returns around 200 or around 250 after 1B frames.
+We support three environments: Atari, Vizdoom, DMLab-30.
 
 ```sh
-python experiment.py --num_actors=48 --batch_size=32
+# Atari (BreakoutNoFrameskip-v4)
+python -m experiment --level_name=atari_breakout --num_actors=4 --logdir=logdir/atari_4_1
 ```
-
-Adjust the number of actors (i.e. number of environments) and batch size to
-match the size of the machine it runs on. A single actor, including DeepMind
-Lab, requires a few hundred MB of RAM.
+```sh
+# Vizdoom (doom_battle)
+python -m experiment --level_name=doom_benchmark --num_actors=4 --logdir=logdir/doom_4_1
+```
+```sh
+# DMLab (rooms_collect_good_objects_train)
+python -m experiment --level_name=rooms_collect_good_objects_train --num_actors=4 --logdir=logdir/dmlab_4_1
+```
 
 ### Distributed Training on DMLab-30
 

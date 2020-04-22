@@ -3,6 +3,8 @@ from gym.spaces import Discrete
 from envs.doom.action_space import doom_action_space, \
     doom_action_space_full_discretized, doom_action_space_basic, doom_action_space_discretized_no_weap
 from envs.doom.doom_gym import VizdoomEnv
+
+from envs.doom.doom_model import register_models
 from envs.doom.wrappers.additional_input import DoomAdditionalInput
 from envs.doom.wrappers.bot_difficulty import BotDifficultyWrapper
 from envs.doom.wrappers.multiplayer_stats import MultiplayerStatsWrapper
@@ -15,11 +17,14 @@ from envs.env_wrappers import ResizeWrapper, RewardScalingWrapper, TimeLimitWrap
 from utils.utils import log
 
 
+VIZDOOM_INITIALIZED = False
+
+
 class DoomSpec:
     def __init__(
             self, name, env_spec_file, action_space, reward_scaling=1.0, default_timeout=-1,
             num_agents=1, num_bots=0,
-            respawn_delay=0,
+            respawn_delay=0, timelimit=4.0,
             extra_wrappers=None,
     ):
         self.name = name
@@ -35,6 +40,7 @@ class DoomSpec:
         self.num_bots = num_bots
 
         self.respawn_delay = respawn_delay
+        self.timelimit = timelimit
 
         # expect list of tuples (wrapper_cls, wrapper_kwargs)
         self.extra_wrappers = extra_wrappers
@@ -52,9 +58,6 @@ DOOM_ENVS = [
         Discrete(1 + 3),  # idle, left, right, attack
         0.01, 300,
     ),
-
-    DoomSpec('doom_corridor', 'deadly_corridor.cfg', Discrete(1 + 7), 0.01, 2100),
-    DoomSpec('doom_gathering', 'health_gathering.cfg', Discrete(1 + 3), 0.01, 2100),
 
     DoomSpec(
         'doom_two_colors_easy', 'two_colors_easy.cfg', doom_action_space_basic(),
@@ -78,7 +81,23 @@ DOOM_ENVS = [
 
     # <==== Environments used in the paper ====>
 
-    # single-player envs
+    # "basic" single-player envs
+
+    DoomSpec('doom_my_way_home', 'my_way_home.cfg', Discrete(1 + 4), 1.0),
+    DoomSpec('doom_deadly_corridor', 'deadly_corridor.cfg', Discrete(1 + 7), 0.01),
+    DoomSpec('doom_defend_the_center', 'defend_the_center.cfg', Discrete(1 + 3), 1.0),
+    DoomSpec('doom_defend_the_line', 'defend_the_line.cfg', Discrete(1 + 3), 1.0),
+    DoomSpec(
+        'doom_health_gathering', 'health_gathering.cfg', Discrete(1 + 4), 1.0,
+        extra_wrappers=[(DoomGatheringRewardShaping, {})],  # same as https://arxiv.org/pdf/1904.01806.pdf
+    ),
+    DoomSpec(
+        'doom_health_gathering_supreme', 'health_gathering_supreme.cfg', Discrete(1 + 4), 1.0,
+        extra_wrappers=[(DoomGatheringRewardShaping, {})],  # same as https://arxiv.org/pdf/1904.01806.pdf
+    ),
+
+
+    # "challenging" single-player envs
     DoomSpec(
         'doom_battle', 'battle_continuous_turning.cfg', doom_action_space_discretized_no_weap(), 1.0, 2100,
         extra_wrappers=[ADDITIONAL_INPUT, BATTLE_REWARD_SHAPING],
@@ -91,7 +110,14 @@ DOOM_ENVS = [
 
     # multi-player envs with bots as opponents (still only one agent)
 
-    # TODO: duel env with bots?
+    DoomSpec(
+        'doom_duel_bots',
+        'ssl2.cfg',
+        doom_action_space_full_discretized(with_use=True),
+        1.0, int(1e9),
+        num_agents=1, num_bots=1, respawn_delay=2,
+        extra_wrappers=[ADDITIONAL_INPUT, BOTS_REWARD_SHAPING],
+    ),
 
     DoomSpec(
         'doom_deathmatch_bots',
@@ -158,6 +184,8 @@ def make_doom_env_impl(
             doom_spec.action_space, doom_spec.env_spec_file, skip_frames=skip_frames, async_mode=async_mode,
         )
     else:
+        timelimit = cfg.timelimit if cfg.timelimit is not None else doom_spec.timelimit
+
         from envs.doom.multiplayer.doom_multiagent import VizdoomEnvMultiplayer
         env = VizdoomEnvMultiplayer(
             doom_spec.action_space, doom_spec.env_spec_file,
@@ -165,13 +193,14 @@ def make_doom_env_impl(
             skip_frames=skip_frames,
             async_mode=async_mode,
             respawn_delay=doom_spec.respawn_delay,
+            timelimit=timelimit,
         )
 
     record_to = cfg.record_to if 'record_to' in cfg else None
     should_record = False
     if env_config is None:
         should_record = True
-    elif env_config.worker_index == 0 and env_config.vector_index == 0 and (player_id is None or player_id <= 1):
+    elif env_config.worker_index == 0 and env_config.vector_index == 0 and (player_id is None or player_id == 0):
         should_record = True
 
     if record_to is not None and should_record:
@@ -259,6 +288,8 @@ def make_doom_multiplayer_env(doom_spec, cfg=None, env_config=None, **kwargs):
 
 
 def make_doom_env(env_name, **kwargs):
+    ensure_initialized()
+
     spec = doom_env_by_name(env_name)
 
     if spec.num_agents > 1 or spec.num_bots > 0:
@@ -266,3 +297,13 @@ def make_doom_env(env_name, **kwargs):
         return make_doom_multiplayer_env(spec, **kwargs)
     else:
         return make_doom_env_impl(spec, **kwargs)
+
+
+def ensure_initialized():
+    global VIZDOOM_INITIALIZED
+    if VIZDOOM_INITIALIZED:
+        return
+
+    register_models()
+
+    VIZDOOM_INITIALIZED = True
