@@ -11,7 +11,7 @@ from envs.create_env import create_env
 
 DOOM_W = 128
 DOOM_H = 72
-DOOM_DIMENSION = 3
+DOOM_CHANNELS = 3
 
 # use the same number of actions as dmlab
 DOOM_ACTION_SET = (
@@ -84,7 +84,7 @@ class PyProcessDoom:
     """Returns a nest of `TensorSpec` with the method's output specification."""
 
     observation_spec = [
-        tf.contrib.framework.TensorSpec([DOOM_H, DOOM_W, DOOM_DIMENSION], tf.uint8),
+        tf.contrib.framework.TensorSpec([DOOM_H, DOOM_W, DOOM_CHANNELS], tf.uint8),
         # tf.contrib.framework.TensorSpec([], tf.string),
     ]
 
