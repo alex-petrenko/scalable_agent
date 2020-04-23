@@ -9,11 +9,31 @@ from threading import Thread
 import cv2
 import gym
 import numpy as np
+from filelock import FileLock, Timeout
 from gym.utils import seeding
 from vizdoom.vizdoom import ScreenResolution, DoomGame, Mode, AutomapMode
 
 from algorithms.spaces.discretized import Discretized
-from utils.utils import log
+from utils.utils import log, project_tmp_dir
+
+
+def doom_lock_file(max_parallel):
+    """
+    Doom instances tend to have problems starting when a lot of them are initialized in parallel.
+    This is not a problem during normal execution once the envs are initialized.
+
+    The "sweet spot" for the number of envs that can be initialized in parallel is about 5-10.
+    Here we use file locking mechanism to ensure that only a limited amount of envs are being initialized at the same
+    time.
+    This tends to be more of a problem for multiplayer envs.
+
+    This also has an advantage of working across completely independent process groups, e.g. different experiments.
+    """
+    lock_filename = f'doom_{random.randrange(0, max_parallel):03d}.lockfile'
+
+    tmp_dir = project_tmp_dir()
+    lock_path = join(tmp_dir, lock_filename)
+    return lock_path
 
 
 def key_to_action_default(key):
@@ -35,16 +55,24 @@ def key_to_action_default(key):
     """
     from pynput.keyboard import Key
 
+    # health gathering
     action_table = {
-        Key.up: 0,
-        Key.down: 1,
-        Key.alt: 6,
-        Key.ctrl: 11,
-        Key.shift: 12,
-        Key.space: 13,
-        Key.right: 'turn_right',
-        Key.left: 'turn_left',
+        Key.left: 0,
+        Key.right: 1,
+        Key.up: 2,
+        Key.down: 3,
     }
+
+    # action_table = {
+    #     Key.up: 0,
+    #     Key.down: 1,
+    #     Key.alt: 6,
+    #     Key.ctrl: 11,
+    #     Key.shift: 12,
+    #     Key.space: 13,
+    #     Key.right: 'turn_right',
+    #     Key.left: 'turn_left',
+    # }
 
     return action_table.get(key, None)
 
@@ -165,6 +193,33 @@ class VizdoomEnv(gym.Env):
 
         self._set_game_mode(mode)
 
+    def _game_init(self, with_locking=True, max_parallel=10):
+        lock_file = lock = None
+        if with_locking:
+            lock_file = doom_lock_file(max_parallel)
+            lock = FileLock(lock_file)
+
+        init_attempt = 0
+        while True:
+            init_attempt += 1
+            try:
+                if with_locking:
+                    with lock.acquire(timeout=20):
+                        self.game.init()
+                else:
+                    self.game.init()
+
+                break
+            except Timeout:
+                if with_locking:
+                    log.debug(
+                        'Another process currently holds the lock %s, attempt: %d', lock_file, init_attempt,
+                    )
+            except Exception as exc:
+                log.warning('VizDoom game.init() threw an exception %r. Terminate process...', exc)
+                from envs.env_utils import EnvCriticalError
+                raise EnvCriticalError()
+
     def initialize(self):
         self._create_doom_game(self.mode)
 
@@ -188,8 +243,7 @@ class VizdoomEnv(gym.Env):
             self.game.add_game_args('+am_thingcolor_item 00ff00')
             # self.game.add_game_args("+am_thingcolor_citem 00ff00")
 
-        self.game.init()
-
+        self._game_init()
         self.initialized = True
 
     def _ensure_initialized(self):
@@ -233,7 +287,7 @@ class VizdoomEnv(gym.Env):
         return variables
 
     def demo_path(self, episode_idx):
-        demo_name = f'ep_{episode_idx:03d}_rec.lmp'
+        demo_name = f'e{episode_idx:03d}.lmp'
         demo_path = join(self.record_to, demo_name)
         demo_path = os.path.normpath(demo_path)
         return demo_path
@@ -250,11 +304,18 @@ class VizdoomEnv(gym.Env):
             log.warning('Recording episode demo to %s', demo_path)
             self.game.new_episode(demo_path)
         else:
-            # no demo recording (default)
-            self.game.new_episode()
+            if self._num_episodes > 0:
+                # no demo recording (default)
+                self.game.new_episode()
 
         self.state = self.game.get_state()
-        img = self.state.screen_buffer
+        img = None
+        try:
+            img = self.state.screen_buffer
+        except AttributeError:
+            # sometimes Doom does not return screen buffer at all??? Rare bug
+            pass
+
         if img is None:
             log.error('Game returned None screen buffer! This is not supposed to happen!')
             img = self._black_screen()
@@ -287,14 +348,7 @@ class VizdoomEnv(gym.Env):
 
         actions_flattened = []
         for i, action in enumerate(actions):
-            if isinstance(spaces[i], gym.spaces.Box):
-                # continuous action
-                actions_flattened.extend(list(action * self.delta_actions_scaling_factor))
-            elif isinstance(spaces[i], Discretized):
-                # discretized continuous action
-                continuous_action = spaces[i].to_continuous(action)
-                actions_flattened.append(continuous_action)
-            elif isinstance(spaces[i], gym.spaces.Discrete):
+            if isinstance(spaces[i], gym.spaces.Discrete):
                 # standard discrete action
                 num_non_idle_actions = spaces[i].n - 1
                 action_one_hot = np.zeros(num_non_idle_actions, dtype=np.uint8)
@@ -302,6 +356,13 @@ class VizdoomEnv(gym.Env):
                     action_one_hot[action - 1] = 1  # 0th action in each subspace is a no-op
 
                 actions_flattened.extend(action_one_hot)
+            elif isinstance(spaces[i], Discretized):
+                # discretized continuous action
+                continuous_action = spaces[i].to_continuous(action)
+                actions_flattened.append(continuous_action)
+            elif isinstance(spaces[i], gym.spaces.Box):
+                # continuous action
+                actions_flattened.extend(list(action * self.delta_actions_scaling_factor))
             else:
                 raise NotImplementedError(f'Action subspace type {type(spaces[i])} is not supported!')
 
@@ -318,23 +379,7 @@ class VizdoomEnv(gym.Env):
                 if v in info:
                     info[v] -= self._last_episode_info.get(v, 0)
 
-    def step(self, actions):
-        """
-        Action is either a single value (discrete, one-hot), or a tuple with an action for each of the
-        discrete action subspaces.
-        """
-        info = {'num_frames': self.skip_frames}
-
-        if self._actions_flattened is not None:
-            # provided externally, e.g. via human play
-            actions_flattened = self._actions_flattened
-            self._actions_flattened = None
-        else:
-            actions_flattened = self._convert_actions(actions)
-
-        reward = self.game.make_action(actions_flattened, self.skip_frames)
-        state = self.game.get_state()
-        done = self.game.is_episode_finished()
+    def _process_game_step(self, state, done, info):
         if not done:
             observation = np.transpose(state.screen_buffer, (1, 2, 0))
             game_variables = self._game_variables_dict(state)
@@ -348,6 +393,27 @@ class VizdoomEnv(gym.Env):
             info.update(self._prev_info)
 
         self._vizdoom_variables_bug_workaround(info, done)
+
+        return observation, done, info
+
+    def step(self, actions):
+        """
+        Action is either a single value (discrete, one-hot), or a tuple with an action for each of the
+        discrete action subspaces.
+        """
+        if self._actions_flattened is not None:
+            # provided externally, e.g. via human play
+            actions_flattened = self._actions_flattened
+            self._actions_flattened = None
+        else:
+            actions_flattened = self._convert_actions(actions)
+
+        default_info = {'num_frames': self.skip_frames}
+        reward = self.game.make_action(actions_flattened, self.skip_frames)
+        state = self.game.get_state()
+        done = self.game.is_episode_finished()
+
+        observation, done, info = self._process_game_step(state, done, default_info)
         return observation, reward, done, info
 
     def render(self, mode='human'):
@@ -373,6 +439,12 @@ class VizdoomEnv(gym.Env):
             return None
 
     def close(self):
+        try:
+            if self.game is not None:
+                self.game.close()
+        except RuntimeError as exc:
+            log.warning('Runtime error in VizDoom game close(): %r', exc)
+
         if self.viewer is not None:
             self.viewer.close()
 
@@ -503,21 +575,22 @@ class VizdoomEnv(gym.Env):
                     _, rew, _, _ = env.step(actions)
 
                     new_total_rew = total_rew + rew
-                    # if new_total_rew != total_rew:
-                    #     log.info('Reward: %.3f, total: %.3f', rew, new_total_rew)
+                    if new_total_rew != total_rew:
+                        log.info('Reward: %.3f, total: %.3f', rew, new_total_rew)
                     total_rew = new_total_rew
                     state = doom.game.get_state()
 
                     verbose = True
                     if state is not None and verbose:
                         info = doom.get_info()
-                        # print(
-                        #     'Weapon:', info['SELECTED_WEAPON'],
-                        #     'ready:', info['ATTACK_READY'],
-                        #     'ammo:', info['SELECTED_WEAPON_AMMO'],
-                        #     'pc:', info['PLAYER_COUNT'],
-                        #     'dmg:', info['DAMAGECOUNT'],
-                        # )
+                        print(
+                            'Health:', info['HEALTH'],
+                            # 'Weapon:', info['SELECTED_WEAPON'],
+                            # 'ready:', info['ATTACK_READY'],
+                            # 'ammo:', info['SELECTED_WEAPON_AMMO'],
+                            # 'pc:', info['PLAYER_COUNT'],
+                            # 'dmg:', info['DAMAGECOUNT'],
+                        )
 
                     time_since_last_render = time.time() - last_render_time
                     time_wait = time_between_frames - time_since_last_render
